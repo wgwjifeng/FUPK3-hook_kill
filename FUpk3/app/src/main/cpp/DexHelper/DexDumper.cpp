@@ -8,13 +8,21 @@
 
 
 #include "DexDumper.h"
+#include <sstream>
 
+#include <sys/stat.h>
+#include <zconf.h>
 #include "utils/myfile.h"
 #include "DexHashTable.h"
 #include "FupkImpl.h"
 #include "ClassDefBuilder.h"
-
+#include "utils/hookutils.h"
 #include "JniInfo.h"
+#include <asm/ptrace.h>
+
+extern "C" {
+#include "HookZz/include/hookzz.h"
+}
 
 using namespace FupkImpl;
 
@@ -26,29 +34,147 @@ using namespace FupkImpl;
 uint8_t* codeitem_end(const u1** pData);
 uint8_t* EncodeClassData(DexClassData *pData, int& len);
 
+void pre_call_kill_ptr(RegState *rs, ThreadStack *threadstack, CallStack *callstack) ;
+void post_call_kill_ptr(RegState *rs, ThreadStack *threadstack, CallStack *callstack) ;
 // =============== DexDumper ====================
 
-DexDumper::DexDumper(JNIEnv *env, DvmDex *dvmDex, jobject upkObj) {
+DexDumper::DexDumper(JNIEnv *env, DvmDex *dvmDex, jobject upkObj,std::string dumppathName) {
     mEnv = env;
     mDvmDex = dvmDex;
     mUpkObj = upkObj;
+    mdumppathName = dumppathName;
+    mcinfoarr=NULL;
+}
+
+bool DexDumper::getDexClassInfo(int num)
+{
+    char ss[200]={0};
+    sprintf(ss,"%s.tmpcache",mdumppathName.c_str());
+    FLOGE("tmpcache name %s",ss);
+    auto sz=0;
+    FILE *fr =fopen(ss, "rb");
+    if (fr!=NULL)
+    {
+        fseek(fr, 0, SEEK_END);
+        sz=ftell(fr);
+        fseek(fr, 0, SEEK_SET);
+    }
+
+
+    char *buf=NULL;
+    FLOGE("malloc %d",sz);
+
+    if(sz!=0)
+    {
+        mcinfoarr=(DexClassInfo *)malloc(num*sizeof(DexClassInfo));
+        memset(mcinfoarr,0,num*sizeof(DexClassInfo));
+        buf=(char *)malloc(sz);
+        myfread ( buf, 1, sz, fr);
+        int i=0;
+        int pos=0;
+        while((pos+12+sizeof(DexClassDef))<sz)
+        {
+            FLOGE("read pos %d,i %d",pos,i);
+            int lenc=*(int *)(buf+pos);
+            pos +=4;
+            int index =*(int *)(buf+pos);
+            pos +=4;
+            int deslen=*(int *)(buf+pos);
+            pos+=4;
+            FLOGE("read pos %d,i %d lenc %d index %d deslen %d",pos,i,lenc,index,deslen);
+            if(lenc<=0||index<0||deslen<=0)
+                break;
+            if (lenc!=12+deslen+sizeof(DexClassDef))
+                break;
+            if((pos+deslen+sizeof(DexClassDef))>=sz)
+                break;
+            char classstr[1000]={0};
+            memcpy(classstr,buf+pos,deslen);
+            pos+=deslen;
+            DexClassDef newdef;
+            memcpy(&newdef,buf+pos,sizeof(DexClassDef));
+            pos+=sizeof(DexClassDef);
+
+
+
+            FLOGE("read index %d des %s",index,classstr);
+            mcinfoarr[i].index=index;
+            mcinfoarr[i].classstr=classstr;
+            mcinfoarr[i].newDef=newdef;
+            i++;
+        }
+    }
+
+
+    if(buf!=NULL)
+        free(buf);
+
+    if (fr!=NULL)
+        fclose(fr);
+
+    return true;
+}
+
+int DexDumper::checkdesc(int num,int index,std::string des)
+{
+    if(mcinfoarr==NULL)
+        return -1;
+    if(mcinfoarr[index].classstr==des)
+        return index;
+    for (int i = 0; i < num; ++i) {
+        if(mcinfoarr[i].classstr==des)
+        {
+            FLOGE("index %d not equal %s",i,des.c_str());
+            return i;
+        }
+    }
+    return -1;
+
+}
+
+int (*orig_kill)(__pid_t a1, int a2);
+int fake_kill(__pid_t a1, int a2) {
+    FLOGE("call kill");
+    sleep(20);//等会再退出
+    FLOGE("call end kill");
+     return 0;
 }
 
 bool DexDumper::rebuild() {
+    pid_t pid = getpid();
+    FLOGE("current pid %d", pid);
+    uint32_t lib_addr = get_lib_base(pid ,"libc.so");
+    if (lib_addr>0)
+    {
+        FLOGE("hook libc so %x", lib_addr);
+//        zpointer funt = (zpointer*)(lib_addr + 0x21958 + 0);
+//        ZzBuildHook(funt, NULL, NULL, pre_call_kill_ptr, post_call_kill_ptr, false);
+//        ZzEnableHook(funt);
+        void *kill_ptr = (void *)kill;//跟上面一样效果，kill无论是否执行程序都会退出
+
+        ZzBuildHook((void *)kill_ptr, (void *)fake_kill, (void **)&orig_kill, pre_call_kill_ptr, post_call_kill_ptr,false);
+        ZzEnableHook((void *)kill_ptr);
+
+    }
+
+
+
+
     // scan for basic data ---- DexFile Header
     AutoJniEnvRelease envGuard(mEnv);
-
+    FLOGE("DexDumper::rebuild");
     jclass upkClazz = mEnv->GetObjectClass(mUpkObj);
     auto loaderObject = JniInfo::GetObjectField(mEnv, mUpkObj, "appLoader", "Ljava/lang/ClassLoader;");
     if (loaderObject == nullptr) {
         // not valid ... just kill it
+        FLOGE("DexDumper::rebuild loaderObject == nullptr");
         return false;
     }
     auto self = FupkImpl::fdvmThreadSelf();
     auto tryLoadClass_method = mEnv->GetMethodID(upkClazz, "tryLoadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
     Object* gLoader = FupkImpl::fdvmDecodeIndirectRef(self, loaderObject);
     mEnv->DeleteLocalRef(loaderObject);
-
+    FLOGE("DexDumper::rebuild DeleteLocalRef");
 
     DexFile *pDexFile = mDvmDex->pDexFile;
     if (pDexFile->pOptHeader) {
@@ -58,6 +184,7 @@ bool DexDumper::rebuild() {
     mymemcpy(&mDexHeader, pDexFile->pHeader, sizeof(DexHeader));
     mymemcpy(mDexHeader.magic, DEXMAGIC, sizeof(mDexHeader.magic));
 
+    FLOGE("DexDumper::rebuild before fixDexHeader");
     fixDexHeader();
 
 
@@ -75,14 +202,56 @@ bool DexDumper::rebuild() {
     // the interface reserved field is used to transport data
     gUpkInterface->reserved0 = &shared;
 
+    FLOGE("DexDumper::rebuild before while shared.total_point %d",shared.total_point);
     while(shared.total_point & 3) {
         shared.total_point += 1;
         shared.extra.push_back(shared.padding);
     }
 
-    FLOGI("num class def: %u", shared.num_class_defs);
+//    char ss[200]={0};
+//    sprintf(ss,"%s.tmpcache",mdumppathName.c_str());
+//    FLOGE("tmpcache name %s",ss);
+//    auto sz=0;
+//    FILE *fr =fopen(ss, "rb");
+//    if (fr!=NULL)
+//    {
+//        FLOGE("fstat");
+//        fseek(fr, 0, SEEK_END);
+//        sz=ftell(fr);
+//        fseek(fr, 0, SEEK_SET);
+//    }
+
+
+//    char *buf=NULL;
+//    FLOGE("malloc %d",sz);
+//    DexClassInfo *cinfoarr=(DexClassInfo *)malloc(shared.num_class_defs*sizeof(DexClassInfo));
+//    if(sz!=0)
+//    {
+//        buf=(char *)malloc(sz);
+//        FLOGE("openfile read");
+//        fread ( buf, 1, sz, fr);
+//
+//
+//    }
+
+
+
+//
+//    if (fr!=NULL)
+//        fclose(fr);
+
+//    getDexClassInfo(shared.num_class_defs);
+
+//    FLOGE("openfile");
+//    auto fd = fopen(ss, "wb");
+//    myfwrite(dumper.mRebuilded.c_str(), 1, dumper.mRebuilded.length(), fd);
+//    myfflush(fd);
+//    myfclose(fd);
+
+//rebuild 过程保存，防止class太多导致过程中断又重新开始
+    FLOGE("num class def: %u", shared.num_class_defs);
     for(int i = 0; i < shared.num_class_defs; i++) {
-        FLOGI("cur class: %u Total: %u", i, shared.num_class_defs);
+        FLOGE("cur class: %u Total: %u", i, shared.num_class_defs);
 
         // try use interpret first
         auto origClassDef = dexGetClassDef(mDvmDex->pDexFile, i);
@@ -92,7 +261,30 @@ bool DexDumper::rebuild() {
         // get dot name
 
         std::string dotDescriptor = descriptor;
+//        int x=checkdesc(shared.num_class_defs,i,dotDescriptor);
+//        if (x!= -1)
+//        {//不重复执行
+//            FLOGE("des: %s already deal,continue.",descriptor);
+//            char stri[1000]={0};
+//            int dlen=strlen(descriptor);
+//            int lenstri=4+4+4+dlen+sizeof(DexClassDef);
+//            if(lenstri<1000)
+//            {
+//                memcpy(stri,&lenstri,4);
+//                memcpy(stri+4,&i,4);
+//                memcpy(stri+8,&dlen,4);
+//                memcpy(stri+12,descriptor,dlen);
+//                memcpy(stri+12+dlen,&mcinfoarr[i].newDef,sizeof(DexClassDef));
+//                myfwrite(stri, 1,lenstri, fd);
+//            }
+//            else{
+//                FLOGE("len>=1000");
+//            }
+//            shared.classFile.append((char*)&mcinfoarr[i].newDef, sizeof(DexClassDef));
+//            continue;
+//        }
         dotDescriptor = dotDescriptor.substr(1, dotDescriptor.length() - 2);
+//        FLOGE("dotDescriptor: %s",dotDescriptor.c_str());
         for(char *c = (char*)dotDescriptor.c_str(); *c != '\0'; c++) {
             if (*c == '/') {
                 *c = '.';
@@ -118,21 +310,24 @@ bool DexDumper::rebuild() {
         if (Clazz == nullptr) {
             Clazz = FupkImpl::floadClassFromDex(mDvmDex,
                                                 dexGetClassDef(mDvmDex->pDexFile, i), gLoader);
+            FLOGE("after load class loadClassFromDex");
         }
 
         // class loaded, then use ClassObject to rebuild classDef
         auto defBuilder = ClassDefBuilder(Clazz, (DexClassDef*)origClassDef, pDexFile, &sHash);
         auto newDef = defBuilder.getClassDef();
 
+//        FLOGE("newDef %d %d %d %d %d %x",
+//                newDef->accessFlags,newDef->classIdx,newDef->accessFlags,newDef->sourceFileIdx,newDef->superclassIdx,newDef->classDataOff);
 
         if (newDef->classDataOff == 0) {
-            FLOGI("des: %s is passed", descriptor);
+            FLOGE("des: %s is passed", descriptor);
             goto writeClassDef;
         } else {
-            FLOGI("des %s", descriptor);
+            FLOGE("des %s", descriptor);
             auto newData = defBuilder.getClassData();
             if (Clazz != nullptr) {
-                FLOGI("fix with dvm ClassObject");
+                FLOGE("fix with dvm ClassObject");
                 u4 lastIndex = 0;
                 for(int i = 0; i < newData->header.directMethodsSize; i++) {
                     fixMethodByDvm(shared, &newData->directMethods[i],
@@ -144,7 +339,7 @@ bool DexDumper::rebuild() {
                                    &defBuilder, lastIndex);
                 }
             } else {
-                FLOGI("fix with memory classDef");
+                FLOGE("fix with memory classDef");
 
                 if (newData->directMethods) {
                     for(auto j = 0; j < newData->header.directMethodsSize; j++) {
@@ -172,9 +367,35 @@ bool DexDumper::rebuild() {
 
 
         writeClassDef:
+//        char stri[1000]={0};
+//        int dlen=strlen(descriptor);
+//        int lenstri=4+4+4+dlen+sizeof(DexClassDef);
+//        if(lenstri<1000)
+//        {
+//            memcpy(stri,&lenstri,4);
+//            memcpy(stri+4,&i,4);
+//            memcpy(stri+8,&dlen,4);
+//            memcpy(stri+12,descriptor,dlen);
+//            memcpy(stri+12+dlen,newDef,sizeof(DexClassDef));
+//            myfwrite(stri, 1,lenstri, fd);
+//        }
+//        else{
+//            FLOGE("len>=1000");
+//        }
+
+
+//        sprintf(stri,"%d\t",i);
+//        myfwrite(stri, 1,strlen(stri), fd);
+//        myfwrite((char*)descriptor, 1,strlen(descriptor), fd);
+//        myfwrite("\t", 1,strlen("\t"), fd);
+//        myfwrite((char*)newDef, 1,sizeof(DexClassDef), fd);
+//        myfwrite("\n", 1,strlen("\n"), fd);
         shared.classFile.append((char*)newDef, sizeof(DexClassDef));
     }
 
+//    fclose(fd);
+    free(mcinfoarr);
+    FLOGE("end class def: %u", shared.num_class_defs);
     // the local value is not used anymore, just clear it
     gUpkInterface->reserved0 = nullptr;
 
@@ -257,6 +478,7 @@ bool DexDumper::fixMethodByDvm(DexSharedData &shared, DexMethod *dexMethod,
     lastIndex = lastIndex + dexMethod->methodIdx;
     auto m = builder->getMethodMap(lastIndex);
 
+    FLOGI("DexDumper::fixMethodByDvm");
     assert(m != nullptr && "Unable to fix MethodBy Dvm, this should happened");
 
     shared.mCurMethod = dexMethod;
@@ -268,6 +490,7 @@ bool DexDumper::fixMethodByDvm(DexSharedData &shared, DexMethod *dexMethod,
 bool fupk_ExportMethod(void *thread, Method *method) {
     DexSharedData* shared = (DexSharedData*)gUpkInterface->reserved0;
     DexMethod* dexMethod = shared->mCurMethod;
+    FLOGI("fupk_ExportMethod");
     u4 ac = (method->accessFlags) & mask;
     if (method->insns == nullptr || ac & ACC_NATIVE) {
         if (ac & ACC_ABSTRACT) {
@@ -406,4 +629,31 @@ uint8_t* EncodeClassData(DexClassData *pData, int& len)
     }
 
     return result;
+}
+
+
+void pre_call_kill_ptr(RegState *rs, ThreadStack *threadstack, CallStack *callstack) {
+LOGE("hooked so pre call -----------pre_call_kill_ptr,callstack %x",*threadstack);
+
+
+/*
+    //第五个参数
+    uint32_t sp  = rs->sp;
+    LOGD("sp:%#x",sp);
+    LOGD("r3_len:%d",*(uint32_t*)(sp));
+    STACK_SET(callstack,"sp",sp,uint32_t);
+*/
+}
+void post_call_kill_ptr(RegState *rs, ThreadStack *threadstack, CallStack *callstack) {
+    LOGE("hooked so post call -----------post_call_kill_ptr");
+
+//    uint32_t r0 =  rs->general.regs.r0;
+//    STACK_SET(callstack, "r0", r0 , uint32_t );
+/*
+    //第五个参数
+    uint32_t sp  = rs->sp;
+    LOGD("sp:%#x",sp);
+    LOGD("r3_len:%d",*(uint32_t*)(sp));
+    STACK_SET(callstack,"sp",sp,uint32_t);
+*/
 }

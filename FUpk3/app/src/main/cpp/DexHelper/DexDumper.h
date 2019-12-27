@@ -36,9 +36,16 @@ struct DexSharedData {
     std::string extra;
 };
 
+struct DexClassInfo {
+    /*  */
+    int                 index;
+    std::string         classstr;
+    DexClassDef         newDef;
+};
+
 class DexDumper {
 public:
-    DexDumper(JNIEnv *env, DvmDex *dvmDex, jobject upkObj);
+    DexDumper(JNIEnv *env, DvmDex *dvmDex, jobject upkObj,std::string dumppathName);
     bool rebuild();
 
     std::string mRebuilded;
@@ -47,15 +54,19 @@ private:
     bool fixMethodByMemory(DexSharedData& shared, DexMethod* dexMethod, DexFile* dexFile);
     bool fixMethodByDvm(DexSharedData &shared, DexMethod *dexMethod,
                         ClassDefBuilder* builder, u4 &lastIndex);
+    bool getDexClassInfo(int num);
+    int checkdesc(int num,int index,std::string des);
 
     JNIEnv* mEnv;
     DvmDex* mDvmDex;
     jobject mUpkObj;
+    std::string mdumppathName;
 
     // rebuilded data
     DexOptHeader mDexOptHeader;
     DexHeader mDexHeader;
 
+    DexClassInfo *mcinfoarr;
 
 };
 

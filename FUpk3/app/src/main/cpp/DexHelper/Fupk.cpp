@@ -31,31 +31,39 @@ Fupk::Fupk(JNIEnv *env, std::string unpackRoot, jobject fupkObj)
 }
 
 bool Fupk::unpackAll() {
-    FLOGD("================ Start to dump all dex files ===============");
+    FLOGE("================ Start to dump all dex files ===============");
     mCookie.print();
     restoreLastStatus();
+    FLOGE("restoreLastStatus finished.");
     RWGuard::getInstance()->reflesh();
+    FLOGE("RWGuard::getInstance()->reflesh finished.");
     // now start to dump
+    FLOGE("mCookie.size:%i", mCookie.size());
     for(int i = 0; i < mCookie.size(); i++) {
+        FLOGE("mCookie i=%i started.", i);
         const char* name;
         auto dvmDex = mCookie.getCookieAt(i, name, mIgnoreCase);
+        FLOGE("mCookie.getCookieAt finished.");
         if (dvmDex == nullptr) {
             continue;
         }
         auto sig = mCookie.getDvmMagic(dvmDex);
+        FLOGE("mCookie.getDvmMagic finished.%s",sig.c_str());
         auto dumpIndex = mInfo.getCookieIndex(name, sig);
+        FLOGE("mInfo.getCookieIndex finished.dumpIndex %d",dumpIndex);
         if (dumpIndex == -1) {
             // no recorded in config.json???
             FLOGE("unable to find cookie config %s", name);
             dumpIndex = -i;
         } else {
             // turn status from wait into unpack
-            if (mInfo.getCookieStatus(dumpIndex) == UnpackInfo::Status::Wait) {
-                FLOGI("------------Dumping dex file %i %s---------------", dumpIndex, name);
+            auto astatus=mInfo.getCookieStatus(dumpIndex);
+            if (astatus == UnpackInfo::Status::Wait) {
+                FLOGE("------------Dumping dex file %i %s status %d---------------", dumpIndex, name,astatus);
                 mInfo.setCookieStatus(dumpIndex, UnpackInfo::Status::Unpack);
                 mInfo.saveConfigFile();
             } else {
-                FLOGE("------------Skipping dex file %i %s-------------", dumpIndex, name);
+                FLOGE("------------Skipping dex file %i %s status %d-------------", dumpIndex, name,astatus);
                 continue;
             }
         }
@@ -66,20 +74,20 @@ bool Fupk::unpackAll() {
 //        mkdir(dumpRoot.c_str(), 0700);
 
 
-        FLOGI("=================Rebuinding dex file=================");
-        DexDumper dumper(mEnv, dvmDex, mUpkObj);
+        FLOGE("=================Rebuinding dex file=================");
+        DexDumper dumper(mEnv, dvmDex, mUpkObj,dumpFile);
         dumper.rebuild();
-        FLOGI("===============Rebuinding dex file End================");
+        FLOGE("===============Rebuinding dex file End================");
 
         auto fd = myfopen(dumpFile.c_str(), "w+");
         myfwrite(dumper.mRebuilded.c_str(), 1, dumper.mRebuilded.length(), fd);
         myfflush(fd);
         myfclose(fd);
 
-        FLOGI("=================== Fix odex instruction==============");
+        FLOGE("=================== Fix odex instruction==============");
         DexFixer fixer((u1 *) dumper.mRebuilded.c_str(), dumper.mRebuilded.length());
         fixer.fixAll();
-        FLOGI("===================== odex fix end ===================");
+        FLOGE("===================== odex fix end ===================");
         // generate
         fd = myfopen(dumpFile.c_str(), "w+");
         myfwrite(dumper.mRebuilded.c_str(), 1, dumper.mRebuilded.length(), fd);
@@ -88,29 +96,34 @@ bool Fupk::unpackAll() {
 
         mInfo.setCookieStatus(dumpIndex, UnpackInfo::Status::Success);
         mInfo.saveConfigFile();
-        FLOGI("===================== dump dex file end %i %s", dumpIndex, name);
+        FLOGE("===================== dump dex file end %i %s", dumpIndex, name);
     }
 
 
 
-    FLOGD("======================== Dump end ==========================");
+    FLOGE("======================== Dump end ==========================");
 
     return false;
 }
 
 bool Fupk::restoreLastStatus() {
     // loading unpack information(avoid re unpack if crash)
-    FLOGD("Loading configure file");
+    FLOGE("Loading configure file");
     if (!mInfo.loadConfigFile()) {
         // may at the first time
         FLOGE("unable to load configure file");
     }
+    FLOGE("mCookie.size:%i", mCookie.size());
     for(int i = 0; i < mCookie.size(); i++) {
+        FLOGE("mCookie i=%i started.", i);
         const char* name;
         auto dvmDex = mCookie.getCookieAt(i, name, mIgnoreCase);
+        FLOGE("mCookie.getCookieAt finished.");
         if (dvmDex == nullptr)
             continue;
         auto sig = mCookie.getDvmMagic(dvmDex);
+        std::string temp = sig;
+        FLOGE("mCookie.getDvmMagic = %s", temp.c_str());
         mInfo.addCookie(name, sig);
     }
     // turn status
@@ -119,6 +132,7 @@ bool Fupk::restoreLastStatus() {
         // just ignore i(dx) at this time
         if (mInfo.getCookieStatus(i) == UnpackInfo::Status::Unpack) {
             mInfo.setCookieStatus(i, UnpackInfo::Status::Fail);
+            FLOGE("mCookie UnpackInfo::Status::Fail");
         }
     }
     // if there are no more cookie to wait for unpack, just turn all failure
