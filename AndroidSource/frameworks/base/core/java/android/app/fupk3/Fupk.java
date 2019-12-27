@@ -54,7 +54,14 @@ public class Fupk {
         appLoader = getSystemLoader();
         unpackAll("/data/data/" + mPackageName);
     }
-
+    public void getmem() {
+        Log.d("F8LEFT", "getmem");
+        Runtime r = Runtime.getRuntime();
+        long m=r.maxMemory();
+        long t=r.totalMemory();
+        long f=r.freeMemory();
+        Log.d("F8LEFT", "getmem max"+m+" total "+t +" free "+f);
+    }
     private native void unpackAll(String folder);
 
     // TODO try more loader case
